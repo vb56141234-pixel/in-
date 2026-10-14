@@ -22,7 +22,18 @@ EXTENSIONS = {'.jpg','.jpeg','.png','.webp'}
 
 def create_app(data_root=None):
     app = Flask(__name__,template_folder=str(BASE/'ui/templates'),static_folder=str(BASE/'ui/static'))
-    app.config.update(SECRET_KEY=secrets.token_hex(32), MAX_CONTENT_LENGTH=512*1024*1024,
+    if data_root is None:
+        key_path=BASE/'data'/'.session-key'
+        key_path.parent.mkdir(parents=True,exist_ok=True)
+        try:
+            with key_path.open('x',encoding='ascii') as key_file:
+                key_file.write(secrets.token_hex(32))
+        except FileExistsError:
+            pass
+        secret_key=key_path.read_text(encoding='ascii').strip()
+    else:
+        secret_key=secrets.token_hex(32)
+    app.config.update(SECRET_KEY=secret_key, MAX_CONTENT_LENGTH=2*1024*1024*1024,
                       SESSION_COOKIE_SAMESITE='Strict', SESSION_COOKIE_HTTPONLY=True)
     storage = Path(data_root or BASE/'data/temp')
     storage.mkdir(parents=True,exist_ok=True)
@@ -32,6 +43,7 @@ def create_app(data_root=None):
     def workspace():
         if 'workspace' not in session:
             session['workspace'] = uuid.uuid4().hex
+            session.permanent = True
         folder = storage/session['workspace']
         folder.mkdir(exist_ok=True)
         return folder
@@ -79,7 +91,7 @@ def create_app(data_root=None):
     @app.errorhandler(Exception)
     def error(exc):
         if isinstance(exc,HTTPException):
-            return jsonify(error='요청이 너무 큽니다 (최대 512MB).' if exc.code==413 else exc.description),exc.code
+            return jsonify(error='요청이 너무 큽니다 (최대 2GB).' if exc.code==413 else exc.description),exc.code
         if isinstance(exc,(ValueError,UnidentifiedImageError,Image.DecompressionBombError)):
             return jsonify(error=str(exc) if isinstance(exc,ValueError) else '손상되거나 너무 큰 이미지입니다.'),400
         if isinstance(exc,ai_service.AIError):
@@ -90,6 +102,11 @@ def create_app(data_root=None):
     def index():
         session.setdefault('csrf', secrets.token_hex(24))
         return render_template('index.html',token=session['csrf'])
+
+    @app.get('/legacy')
+    def legacy_index():
+        session.setdefault('csrf', secrets.token_hex(24))
+        return render_template('legacy.html',token=session['csrf'])
 
     @app.get('/api/state')
     def state():
@@ -223,6 +240,8 @@ def create_app(data_root=None):
             if child.is_file(): child.unlink()
         return jsonify(ok=True)
 
+    from services.post_api import register_post_api
+    register_post_api(app, workspace, read_items)
     return app
 
 app=create_app()

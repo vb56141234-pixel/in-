@@ -1,0 +1,94 @@
+// Optional developer check: npm install playwright; PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium node tests/browser/post-smoke.cjs
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+const base=process.env.STUDIO_TEST_URL||'http://127.0.0.1:8766';
+const fixtures=process.env.STUDIO_FIXTURES||'/tmp/1028fall-fixtures';
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
+ const page=await browser.newPage({viewport:{width:1540,height:1080}}),errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(base);await page.waitForFunction(()=>document.querySelectorAll('.post-set').length===3);
+ assert.equal(await page.locator('#generate').isDisabled(),true);
+ const A=page.locator('.post-set[data-key="A"]');
+ await page.locator('#many-files').setInputFiles(['가을 사진.jpg','日本の旅.png','journey.webp'].map(x=>path.join(fixtures,x)));
+ await page.waitForFunction(()=>document.querySelector('[data-key="A"] .source-count').textContent.includes('3 /'));
+ await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+ await page.locator('#manual').click();
+ await page.waitForFunction(()=>document.querySelectorAll('[data-key="A"] .slide-card').length===3);
+ await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+ await A.locator('.hook').fill('가을을 함께 걷는 세 가지 순간');
+ await A.locator('.caption').fill('천천히 걷다 보면 새로운 풍경이 보여요. 🍂');
+ const first=A.locator('.slide-card').first();
+ await first.locator('.slide-text').fill('가을을 함께 걷는 세 가지 순간');
+ await page.locator('[data-style="color"]').fill('#c4f078');
+ await page.locator('[data-style="font_size"]').fill('6');
+ await page.locator('[data-style="line_height"]').fill('1.5');
+ await page.locator('[data-style="text_background"]').check();
+ await page.locator('[data-move="left"]').click();
+ await page.waitForTimeout(550);
+ const preview=first.locator('.slide-preview');await preview.scrollIntoViewIfNeeded();
+ const rect=await preview.boundingBox();await page.mouse.move(rect.x+rect.width*.5,rect.y+rect.height*.7);await page.mouse.down();await page.mouse.move(rect.x+rect.width*.42,rect.y+rect.height*.6);await page.mouse.up();
+ await page.locator('#logo-file').setInputFiles(path.join(fixtures,'logo.png'));
+ await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+ await page.locator('#language').selectOption('ja');await page.locator('#manual').click();
+ await page.waitForFunction(()=>document.querySelectorAll('[data-key="A"] .version-tabs button').length===2);
+ await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+ await A.locator('.hook').fill('秋の景色を楽しむ小さな旅');await A.locator('.caption').fill('今日の散歩で見つけた景色。');
+ await A.locator('.version-tabs button').filter({hasText:'KO'}).click();
+ await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+ assert.equal(await A.locator('.hook').inputValue(),'가을을 함께 걷는 세 가지 순간');
+ // Reorder SOURCE by drag and drop; existing version keeps its original story.
+ const before=await(await page.request.get(base+'/api/v2/project')).json();
+ const firstId=before.project.sets.A.source_ids[0];
+ await A.locator('.source-thumb').first().dragTo(A.locator('.source-thumb').nth(2));
+ await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+ await page.waitForFunction(()=>!document.querySelector('[data-key="A"] .stale-warning').hidden);
+ let state=await(await page.request.get(base+'/api/v2/project')).json();
+ assert.notEqual(state.project.sets.A.source_ids[0],firstId);
+ assert.equal(state.project.sets.A.versions.ko.slides[0].source_id,firstId);
+ // B and C have independent sources and manual content.
+ for(const key of ['B','C']){
+  await page.locator(`[data-set="${key}"]`).click();
+  const [chooser]=await Promise.all([page.waitForEvent('filechooser'),page.locator('#add-many').click()]);
+  await chooser.setFiles(path.join(fixtures,'journey.webp'));
+  await page.waitForFunction(k=>document.querySelector(`[data-key="${k}"] .source-count`).textContent.includes('1 /'),key);
+  await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+  await page.locator('#manual').click();
+  await page.waitForFunction(k=>document.querySelectorAll(`[data-key="${k}"] .slide-card`).length===1,key);
+  await page.waitForFunction(()=>!document.querySelector('#manual').disabled);
+  await page.locator(`[data-key="${key}"] .hook`).fill(key+' SET 日本語の物語');
+ }
+ await page.locator('[data-set="A"]').click();
+ const [image]=await Promise.all([page.waitForEvent('download'),A.locator('.slide-download').first().click()]);
+ await image.saveAs(path.join(fixtures,'post-image.png'));
+ await page.waitForFunction(()=>!document.querySelector('#download-version').disabled);
+ for(const [id,name]of [['download-version','post-version.zip'],['download-set','post-set.zip'],['download-all','post-all.zip'],['download-project','post-project.zip']]){
+  const [file]=await Promise.all([page.waitForEvent('download'),page.locator('#'+id).click()]);
+  await file.saveAs(path.join(fixtures,name));
+  await page.waitForFunction(()=>!document.querySelector('#download-version').disabled);
+ }
+ page.on('dialog',dialog=>dialog.accept());
+ await page.locator('#new-project').click();
+ await page.waitForFunction(()=>document.querySelectorAll('.source-thumb').length===0);
+ await page.waitForFunction(()=>!document.querySelector('#restore').disabled);
+ await page.locator('#project-file').setInputFiles(path.join(fixtures,'post-project.zip'));
+ await page.waitForFunction(()=>document.querySelectorAll('.slide-card').length===5);
+ await page.waitForFunction(()=>!document.querySelector('#restore').disabled);
+ state=await(await page.request.get(base+'/api/v2/project')).json();
+ assert.equal(state.project.sets.A.versions.ko.hook,'가을을 함께 걷는 세 가지 순간');
+ assert.equal(state.project.sets.A.versions.ja.hook,'秋の景色を楽しむ小さな旅');
+ const style=state.project.sets.A.versions.ko.slides[0].style;
+ assert.equal(style.color,'#c4f078');assert.equal(style.font_size,6);assert.equal(style.text_background,true);
+ assert.ok(Math.abs(style.x-42)<1);assert.ok(Math.abs(style.y-60)<1);
+ await page.reload();await page.waitForFunction(()=>document.querySelectorAll('.slide-card').length===5);
+ for(const image of await page.locator('.slide-preview img').all())await image.scrollIntoViewIfNeeded();
+ await page.waitForFunction(()=>[...document.querySelectorAll('.slide-preview img')].every(i=>i.complete&&i.naturalWidth===1080));
+ await page.evaluate(()=>{window.scrollTo(0,0);document.querySelector('aside').scrollTop=0;});
+ await page.screenshot({path:'/workspace/1028FALL_Post_Set_preview.png'});
+ await page.setViewportSize({width:390,height:844});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+ assert.deepEqual(errors,[]);
+ console.log('PASS browser: A/B/C, 3 formats, manual KO/JA preservation, drag SOURCE/position, editor/logo, four ZIP scopes, PNG, complete project restore, reload, mobile overflow, no JS errors');
+ await browser.close();
+})().catch(error=>{console.error(error);process.exit(1);});
